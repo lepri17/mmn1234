@@ -148,6 +148,38 @@ if __name__ == "__main__":
                             print(f"Sent AES key to {username}.")
 
                         ##################################################################################
+                        # Handle reconnect request (code 827)
+                        elif req.code == 827:  # קוד בקשה עבור התחברות חוזרת
+                            username = req.payload.rstrip('\x00')  # Extract the username and remove the null terminator
+                            print(f"Reconnect request received for user: {username}")
+
+                            if username in registered_users:  # Check if the user is registered
+                                print(f"User {username} exists. Reconnection confirmed.")
+
+                                # Generate a new AES key (similar to code 1602 logic)
+                                client_id = str(uuid.uuid4())[
+                                            :16]  # Generate or use existing client ID, make sure it's 16 bytes
+                                public_key_pem = req.payload  # You might need to retrieve the stored public key from memory
+                                encrypted_aes_key = send_encrypted_aes_key(username,
+                                                                           public_key_pem)  # Encrypt AES key using public key
+
+                                # Send response for successful reconnection with AES key
+                                response = struct.pack('!B H I', 1, 1605, len(encrypted_aes_key)) + client_id.encode(
+                                    'utf-8').ljust(16, b'\x00') + encrypted_aes_key
+                                conn.sendall(response)
+                                print(f"Sent AES key and reconnection confirmation with client ID: {client_id}")
+
+                            else:
+                                print(f"User {username} not found. Reconnection denied.")
+
+                                # Send failure response (reconnection denied) with code 1606
+                                client_id = str(uuid.uuid4())[
+                                            :16]  # Generate or reuse existing client ID, ensure it's 16 bytes
+                                response = struct.pack('!B H I', 1, 1606, 16) + client_id.encode('utf-8').ljust(16,
+                                                                                                                b'\x00')
+                                conn.sendall(response)
+                                print(f"Sent reconnection denial for user: {username}")
+
 
                         else:
                             print(f"Unknown request code: {client_id}")
