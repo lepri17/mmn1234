@@ -1,4 +1,5 @@
 import struct
+import time
 import uuid
 import socket
 import base64
@@ -193,6 +194,7 @@ def handle_client(conn, addr):
                 username = payloadSplited[0]
                 public_key_pem = payloadSplited[1]
                 # הצפנת מפתח AES בעזרת המפתח הציבורי ושליחת תשובה
+
                 response = send_encrypted_aes_key(username, public_key_pem)
                 conn.sendall(response)
                 print(f"Sent AES key to {username}.")
