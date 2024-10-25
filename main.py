@@ -11,8 +11,12 @@ from enum import Enum
 from cksum import memcrc
 from Crypto.Cipher import AES
 import cksum
+import threading
 
+from threading import Lock
 
+# יצירת מנעול לשימוש בפונקציות הקוראות והכותבות לקובץ
+file_lock = Lock()
 def get_bits(input_string, num_bits):
     binary_data = ''.join(format(ord(char), '08b') for char in input_string)
     return binary_data[:num_bits]
@@ -68,25 +72,39 @@ registered_users = set()
 
 # Check if the user is registered in the file and register if not
 def check_and_register_user_in_file(username):
-    users = {}
-    if os.path.exists('registed_name_uuid.txt'):
-        with open('registed_name_uuid.txt', 'r') as file:
-            for line in file:
-                stored_username, stored_uuid, stored_aes_key = line.strip().split(',')
-                users[stored_username] = (stored_uuid, stored_aes_key)
+    with file_lock:  # כניסה לנעילה בעת עבודה עם הקובץ
+        users = {}
+        if os.path.exists('registed_name_uuid.txt'):
+            with open('registed_name_uuid.txt', 'r') as file:
+                for line in file:
+                    stored_username, stored_uuid, *_ = line.strip().split(',')
+                    users[stored_username] = (stored_uuid)
 
-    if username in users:
-        return False, users[username][0], users[username][1]  # User already exists
-    else:
-        new_uuid = (uuid.uuid4())  # Generate new UUID
-        uuid_16_bytes = new_uuid.bytes
-        aes_key = base64.b64encode(get_random_bytes(32)).decode('ascii')  # Generate AES key
-        users[username] = (uuid_16_bytes, aes_key)
-        # Write the new user data to the file
-        with open('registed_name_uuid.txt', 'a') as file:
-            file.write(f"{username},{new_uuid},{aes_key}\n")
+        if username in users:
+            return False, users[username][0], users[username][1]  # User already exists
+        else:
+            new_uuid = (uuid.uuid4())  # Generate new UUID
+            uuid_16_bytes = new_uuid.bytes
+            users[username] = (uuid_16_bytes)
+            # Write the new user data to the file
+            with open('registed_name_uuid.txt', 'a') as file:
+                file.write(f"{username},{new_uuid}\n")
+            return True, new_uuid  # Successfully registered
 
-        return True, new_uuid, aes_key  # Successfully registered
+
+def save_publick_and_aes_key(user_name, aes_key, public_key):
+    end_marker = "#END#"
+    with file_lock:  # כניסה לנעילה בעת עבודה עם הקובץ
+        if os.path.exists('registed_name_uuid.txt'):
+            with open('registed_name_uuid.txt', 'r') as file:
+                lines = file.readlines()
+            with open('registed_name_uuid.txt', 'w') as file:
+                for i, line in enumerate(lines):
+                    username, id_client, *_ = line.strip().split(',')
+                    if user_name == username:
+                        lines[i] = f"{username},{id_client},{aes_key},{public_key}{end_marker}"
+                        break;
+                file.writelines(lines)
 
 
 def send_client_id(client_id, code=EResponseCode.Response_SUCCESS_REGISTRATION.value):  # ---(client_id,1600)
@@ -99,8 +117,10 @@ def send_client_id(client_id, code=EResponseCode.Response_SUCCESS_REGISTRATION.v
 
 
 # פונקציה לטיפול במפתח ציבורי מלקוח והצפנת מפתח AES
-def send_encrypted_aes_key(username, public_key):
-    aes_key_base64 = load_aes_key()  # get_random_bytes(32)
+def send_encrypted_aes_key(username, public_key, code):
+    aes_key_base64 = base64.b64encode(get_random_bytes(32)).decode('ascii')
+    save_publick_and_aes_key(username, aes_key_base64, public_key)
+    # aes_key_base64 = load_aes_by_name(username)
     aes_key = base64.b64decode(aes_key_base64)
     public_key_pem = f"-----BEGIN PUBLIC KEY-----\n{public_key}\n-----END PUBLIC KEY-----"
     public_key = RSA.import_key(public_key_pem)
@@ -108,10 +128,10 @@ def send_encrypted_aes_key(username, public_key):
     encrypted_aes_key = cipher_rsa.encrypt(aes_key)
     # בניית תשובת ההצפנה עם הקוד המתאים
     version = 1
-    code = EResponseCode.Response_GET_SEND_PUBLIC_KEY.value
-    clientId = load_clientId_by_name_key_from_file(username)
+    client_id_str = load_client_id(username)
+    client_id = uuid.UUID(client_id_str)
     clientI16 = client_id.bytes
-
+    # save_publick_and_aes_key(username,aes_key,public_key)
     payload = clientI16 + encrypted_aes_key
     payload_size = len(payload)
     header = struct.pack('!B H I', version, code, payload_size)
@@ -119,40 +139,203 @@ def send_encrypted_aes_key(username, public_key):
     return response
 
 
-# ------------------------for 826----------------------------------------
-# Load AES keys from the registration file
-def load_clientId_by_name_key_from_file(userNAme):
-    if os.path.exists('registed_name_uuid.txt'):
-        with open('registed_name_uuid.txt', 'r') as file:
-            for line in file:
-                stored_username, stored_client_id, stored_aes_key = line.strip().split(',')
-                if stored_username == userNAme:
-                    return uuid.UUID(stored_client_id)  # Decode the stored AES key
-    return None  # Return None if no matching client ID is found
+def load_public_key(user_name):
+    end_marker = "#END#"
+    with open('registed_name_uuid.txt', 'r') as file:
+        content = file.read()
+    records = content.split(end_marker)
+    for record in records:
+        name, id, aes, public = record.split(',')
+        if name == user_name:
+            return public
+    return None
 
 
-# ------------------------for 828----------------------------------------
-# Load AES keys from the registration file
-def load_aes_key():
-    """Loads the AES key for the given client ID from the 'registed_name_uuid.txt' file."""
-    if os.path.exists('registed_name_uuid.txt'):
-        with open('registed_name_uuid.txt', 'r') as file:
-            for line in file:
-                stored_username, stored_client_id, stored_aes_key = line.strip().split(',')
-                return stored_aes_key  # base64.b64decode(stored_aes_key)  # Decode the stored AES key
-    return None  # Return None if no matching client ID is found
+def load_client_id(user_name):
+    end_marker = "#END#"
+    with open('registed_name_uuid.txt', 'r') as file:
+        content = file.read()
+    records = content.split(end_marker)
+    for record in records:
+        name, id, *_ = record.split(',')
+        if name == user_name:
+            return id
+    return None
 
 
-# ------------------------for 828-- Load AES keys from the registration file
-def load_aes_key_from_file(client_id):
-    """Loads the AES key for the given client ID from the 'registed_name_uuid.txt' file."""
-    if os.path.exists('registed_name_uuid.txt'):
-        with open('registed_name_uuid.txt', 'r') as file:
-            for line in file:
-                stored_username, stored_client_id, stored_aes_key = line.strip().split(',')
-                if stored_client_id == client_id:
-                    return base64.b64decode(stored_aes_key)  # Decode the stored AES key
-    return None  # Return None if no matching client ID is found---------------and for 828---------------------------------------------
+def load_aes_by_id(clientid):
+    end_marker = "#END#"
+    with open('registed_name_uuid.txt', 'r') as file:
+        content = file.read()
+    records = content.split(end_marker)
+    for record in records:
+        name, id, aes, *_ = record.split(',')
+        u = uuid.UUID(id)
+        uuid_bytes = u.bytes;
+        if clientid == uuid_bytes:
+            return aes
+    return None
+
+
+def load_aes_by_name(username):
+    end_marker = "#END#"
+    with open('registed_name_uuid.txt', 'r') as file:
+        content = file.read()
+    records = content.split(end_marker)
+    for record in records:
+        name, id, aes, *_ = record.split(',')
+        if username == name:
+            return aes
+    return None
+
+
+def handle_client(conn, addr):
+    with conn:
+        print('Connected by', addr)
+        # Infinite loop waiting for client connections
+        while True:
+            while True:
+                data = conn.recv(1024)
+                if not data:
+                    break
+                req = parse_request(data)
+                #############################825 -->1600####################################
+                if req.code == 825:  # קוד בקשה עבור רישום
+                    success, client_id = check_and_register_user_in_file(req.payload)
+                    if success:
+                        username = req.payload  # שם באורך 255 בתים
+                        response = send_client_id(client_id)
+                        conn.sendall(response)  # שליחת התשובה ללקוח
+                        print(f"Sent client ID: {client_id}  date: {response}")
+                    #############################825 -->#1601####################################
+                    else:
+                        print(f"User {req.payload} already exists.")
+                        response = send_client_id(client_id, code=1601)
+                        conn.sendall(response)
+
+                ################################  טיפול במפתח ציבורי 826 -->1602 #####################################
+                elif req.code == 826:
+                    payloadSplited = req.payload.split('\0')
+                    username = payloadSplited[0]
+                    public_key_pem = payloadSplited[1]
+                    # aes_key =base64.b64encode(get_random_bytes(32)).decode('ascii')
+                    # save_publick_and_aes_key(username,aes_key ,public_key_pem)
+                    # הצפנת מפתח AES בעזרת המפתח הציבורי ושליחת תשובה
+                    response = send_encrypted_aes_key(username, public_key_pem,
+                                                      EResponseCode.Response_GET_SEND_PUBLIC_KEY.value)
+                    conn.sendall(response)
+                    print(f"Sent AES key to {username}.")
+                ############################ 828 Handle file transfer request ################
+                elif req.code == 828:
+                    # Extract Size Content (4 bytes) - Encrypted file
+                    size_content = struct.unpack('!I', data[24:28])[0]
+                    # Extract Size File Orig (4 bytes) - Original file
+                    size_file_orig = struct.unpack('!I', data[28:32])[0]
+                    # Extract Packet Number and Total Packets (4 bytes
+                    packet_number, total_packets = struct.unpack('!HH', data[32:36])
+                    # Extract the File Name (255 bytes,null-terminated)
+                    file_name1 = data[36:291]
+                    file_name = file_name1.split(b'\x00', 1)[0]  # Only take the first part before the padding
+                    content_message = data[291:291 + size_content]
+                    # Saving the encrypted file to disk
+                    encrypted_file_path = f"client_files/received_{req.client_id}_{file_name}"
+                    encrypted_file_path = f"file.txt"
+                    with open(encrypted_file_path, 'wb') as f:
+                        f.write(content_message)
+                    aes_key_base64 = load_aes_by_id(req.client_id)  # load_aes_key_from_file(req.client_id)
+                    aes_key = base64.b64decode(aes_key_base64)
+                    if not aes_key:
+                        raise ValueError(f"No AES key found for client {req.client_id}. Cannot decrypt the file.")
+                    else:
+                        iv = b'\x00' * 16
+                        cipher = AES.new(aes_key, AES.MODE_CBC, iv)
+                        decrypted_content = cipher.decrypt(content_message)
+
+                        # decrypted_content1 = decrypted_content[0: size_file_orig]
+                        # decrypted_content = unpad(decrypted_content, AES.block_size)
+                        # Save the decrypted file
+                        # decrypted_file_path = f"client_files/decrypted_{req.client_id}_{file_name}"
+                        decrypted_file_path = f"client_files/decrypted_file.txt"
+                        # with open(decrypted_file_path, 'wb') as f:
+                        # f.write(decrypted_content_copy)
+                        print(f"Encrypted file content saved as: {encrypted_file_path}")
+                        print(f"Decrypted file content saved as: {decrypted_file_path}")
+
+                        decrypted_content_copy = decrypted_content[:size_file_orig]
+                        with open("fileee.txt", 'wb') as f:
+                            f.write(decrypted_content_copy)
+
+                            # Calculate the CRC checksum using cksum's memcrc
+                    crc_value = memcrc(
+                        decrypted_content[:size_file_orig])  # Use memcrc from cksum.py for the CRC calculation
+
+                    print(f"CRC Checksum: {crc_value:#010x}")
+
+                    # Build the response message (code 1603)
+                    # client_id = req.client_id.encode('utf-8').ljust(16, b'\x00')  # Client ID, padded to 16 bytes
+                    client_id = uuid.uuid4().bytes
+                    size_content_bytes = struct.pack('!I', size_content)  # Size Content (4 bytes)
+                    file_name_bytes = file_name.ljust(255, b'\x00')  # File Name (255 bytes)
+                    crc_bytes = struct.pack('!I', crc_value)  # CRC (4 bytes)
+
+                    # Construct the complete response
+                    response_code = EResponseCode.Response_CRC_FILE_TRANSFER.value  # Use 1603 for CRC confirmation
+                    response = struct.pack('!B H I', 1, response_code, 16 + 4 + 255 + 4)  # Header with payload size
+                    response += client_id + size_content_bytes + file_name_bytes + crc_bytes
+
+                    # Send the response back to the client
+                    conn.sendall(response)
+                    print(f"Sent CRC  response to the client with ID: {req.client_id}")
+                elif req.code == 900:
+                    client_id = uuid.uuid4().bytes
+                    response_code = EResponseCode.Response_CONF_MESSAGE.value
+                    response = struct.pack('!B H I', 1, response_code, 16)  # Header with payload size
+                    response += client_id
+                    conn.sendall(response)
+
+                    print(f"Sent confirmation response to the client with ID: {req.client_id}")
+                elif req.code == 901:
+                    file_name = req.payload.rstrip('\x00')
+                    # retry_counts[file_name] = retry_counts.get(file_name, 0) + 1
+                    client_id = uuid.uuid4().bytes
+                    response_code = EResponseCode.Response_CONF_MESSAGE.value
+                    response = struct.pack('!B H I', 1, response_code, 16)  # Header with payload size
+                    response += client_id
+                    conn.sendall(response)
+                    print(f"not correct {file_name} send gaain CRC ")
+                elif req.code == 902:
+                    file_name = req.payload.rstrip('\x00')
+                    # retry_counts[file_name] = retry_counts.get(file_name, 0) + 1
+                    client_id = uuid.uuid4().bytes
+                    response_code = EResponseCode.Response_CONF_MESSAGE.value
+                    response = struct.pack('!B H I', 1, response_code, 16)  # Header with payload size
+                    response += client_id
+                    conn.sendall(response)
+                    print(f"not correct {file_name} send gaain CRC ")
+
+                ##################################################################################
+
+                # Handle reconnect request (code 827)
+                elif req.code == 827:  # קוד בקשה עבור התחברות חוזרת
+                    username = req.payload.rstrip('\x00')
+                    public_key = load_public_key(username)
+                    if public_key != None:
+                        print(f"User {username} exists. Reconnection confirmed.")
+                        response = send_encrypted_aes_key(username, public_key,
+                                                          EResponseCode.Response_RECONNECT_CONF.value)
+                        conn.sendall(response)
+                        print(f"Sent AES key and reconnection confirmation with user name {username}")
+                    else:
+                        print(f"User {username} not found. Reconnection denied.")
+                        client_id = uuid.uuid4().bytes
+                        response = struct.pack('!B H I', 1, EResponseCode.Response_RECONNECT_IGNORE.value, 16)
+                        response += client_id
+                        conn.sendall(response)
+                        print(f"Sent reconnection denial for user: {username}")
+                else:
+                    print(f"Unknown request code: {client_id}")
+                    conn.sendall(b"Unknown request")
+                print(f"Closing connection with {addr}")
 
 
 if __name__ == "__main__":
@@ -160,168 +343,14 @@ if __name__ == "__main__":
         s.bind((HOST, PORT))
         s.listen()
         print(f"Server is listening on port {PORT}...")
-        # Infinite loop waiting for client connections
+
         while True:
             try:
                 conn, addr = s.accept()
-                with conn:
-                    print('Connected by', addr)
-                    while True:
-                        data = conn.recv(1024)
-                        if not data:
-                            break
-                        req = parse_request(data)  # כל מה שמור שלחה לי
-                        #############################825 -->1600####################################
-                        if req.code == 825:  # קוד בקשה עבור רישום
-                            success, client_id, aes_key = check_and_register_user_in_file(req.payload)
-                            if success:
-                                username = req.payload  # שם באורך 255 בתים
-                                response = send_client_id(client_id)
-                                conn.sendall(response)  # שליחת התשובה ללקוח
-                                print(f"Sent client ID: {client_id}  date: {response}")
-                            #############################825 -->#1601####################################
-                            else:
-                                print(f"User {req.payload} already exists.")
-                                response = send_client_id(client_id, code=1601)
-                                conn.sendall(response)
-
-                        ################################  טיפול במפתח ציבורי 826 -->1602 #####################################
-                        elif req.code == 826:
-                            payloadSplited = req.payload.split('\0')
-                            username = payloadSplited[0]
-                            public_key_pem = payloadSplited[1]
-                            # הצפנת מפתח AES בעזרת המפתח הציבורי ושליחת תשובה
-                            response = send_encrypted_aes_key(username, public_key_pem)
-                            conn.sendall(response)
-                            print(f"Sent AES key to {username}.")
-                        ############################ 828 Handle file transfer request ################
-                        elif req.code == 828:
-                            # Extract Size Content (4 bytes) - Encrypted file
-                            size_content = struct.unpack('!I', data[24:28])[0]
-                            # Extract Size File Orig (4 bytes) - Original file
-                            size_file_orig = struct.unpack('!I', data[28:32])[0]
-                            # Extract Packet Number and Total Packets (4 bytes
-                            packet_number, total_packets = struct.unpack('!HH', data[32:36])
-                            # Extract the File Name (255 bytes,null-terminated)
-                            file_name1 = data[36:291]
-                            file_name = file_name1.split(b'\x00', 1)[0]  # Only take the first part before the padding
-                            content_message = data[291:291 + size_content]
-                            # Saving the encrypted file to disk
-                            encrypted_file_path = f"client_files/received_{req.client_id}_{file_name}"
-                            encrypted_file_path = f"client_files/file.txt"
-                            with open(encrypted_file_path, 'wb') as f:
-                                f.write(content_message)
-                            aes_key_base64 = load_aes_key()  # load_aes_key_from_file(req.client_id)
-                            aes_key = base64.b64decode(aes_key_base64)
-                            if not aes_key:
-                                raise ValueError(
-                                    f"No AES key found for client {req.client_id}. Cannot decrypt the file.")
-                            else:
-                                iv = b'\x00' * 16
-                                cipher = AES.new(aes_key, AES.MODE_CBC, iv)
-                                decrypted_content = cipher.decrypt(content_message)
-
-                                # decrypted_content1 = decrypted_content[0: size_file_orig]
-                                # decrypted_content = unpad(decrypted_content, AES.block_size)
-                                # Save the decrypted file
-                                # decrypted_file_path = f"client_files/decrypted_{req.client_id}_{file_name}"
-                                decrypted_file_path = f"client_files/decrypted_file.txt"
-                                # with open(decrypted_file_path, 'wb') as f:
-                                # f.write(decrypted_content_copy)
-                                print(f"Encrypted file content saved as: {encrypted_file_path}")
-                                print(f"Decrypted file content saved as: {decrypted_file_path}")
-
-                                decrypted_content_copy = decrypted_content[:size_file_orig]
-                                with open("fileee.txt", 'wb') as f:
-                                    f.write(decrypted_content_copy)
-
-                                    # Calculate the CRC checksum using cksum's memcrc
-                            crc_value = memcrc(
-                                decrypted_content[:size_file_orig])  # Use memcrc from cksum.py for the CRC calculation
-
-                            print(f"CRC Checksum: {crc_value:#010x}")
-
-                            # Build the response message (code 1603)
-                            # client_id = req.client_id.encode('utf-8').ljust(16, b'\x00')  # Client ID, padded to 16 bytes
-                            client_id = uuid.uuid4().bytes
-                            size_content_bytes = struct.pack('!I', size_content)  # Size Content (4 bytes)
-                            file_name_bytes = file_name.ljust(255, b'\x00')  # File Name (255 bytes)
-                            crc_bytes = struct.pack('!I', crc_value)  # CRC (4 bytes)
-
-                            # Construct the complete response
-                            response_code = EResponseCode.Response_CRC_FILE_TRANSFER.value  # Use 1603 for CRC confirmation
-                            response = struct.pack('!B H I', 1, response_code,
-                                                   16 + 4 + 255 + 4)  # Header with payload size
-                            response += client_id + size_content_bytes + file_name_bytes + crc_bytes
-
-                            # Send the response back to the client
-                            conn.sendall(response)
-                            print(f"Sent CRC  response to the client with ID: {req.client_id}")
-                        elif req.code == 900:
-                            client_id = uuid.uuid4().bytes
-                            response_code = EResponseCode.Response_CONF_MESSAGE.value
-                            response = struct.pack('!B H I', 1, response_code, 16)  # Header with payload size
-                            response += client_id
-                            conn.sendall(response)
-
-                            print(f"Sent confirmation response to the client with ID: {req.client_id}")
-                        elif req.code == 901:
-                            file_name = req.payload.rstrip('\x00')
-                            # retry_counts[file_name] = retry_counts.get(file_name, 0) + 1
-                            client_id = uuid.uuid4().bytes
-                            response_code = EResponseCode.Response_CONF_MESSAGE.value
-                            response = struct.pack('!B H I', 1, response_code, 16)  # Header with payload size
-                            response += client_id
-                            conn.sendall(response)
-                            print(f"not correct {file_name} send gaain CRC ")
-                        elif req.code == 902:
-                            file_name = req.payload.rstrip('\x00')
-                            # retry_counts[file_name] = retry_counts.get(file_name, 0) + 1
-                            client_id = uuid.uuid4().bytes
-                            response_code = EResponseCode.Response_CONF_MESSAGE.value
-                            response = struct.pack('!B H I', 1, response_code, 16)  # Header with payload size
-                            response += client_id
-                            conn.sendall(response)
-                            print(f"not correct {file_name} send gaain CRC ")
-
-                        ##################################################################################
-
-                        # # Handle reconnect request (code 827)
-                        # elif req.code == 827:  # קוד בקשה עבור התחברות חוזרת
-                        #     username = req.payload.rstrip('\x00')  # Extract the username and remove the null terminator
-                        #     print(f"Reconnect request received for user: {username}")
-                        #
-                        #     if username in registered_users:  # Check if the user is registered
-                        #         print(f"User {username} exists. Reconnection confirmed.")
-                        #
-                        #         # Generate a new AES key (similar to code 1602 logic)
-                        #         client_id = str(uuid.uuid4())[
-                        #                     :16]  # Generate or use existing client ID, make sure it's 16 bytes
-                        #         public_key_pem = req.payload  # You might need to retrieve the stored public key from memory
-                        #         encrypted_aes_key = send_encrypted_aes_key(username,
-                        #                                                    public_key_pem)  # Encrypt AES key using public key
-                        #
-                        #         # Send response for successful reconnection with AES key
-                        #         response = struct.pack('!B H I', 1, 1605, len(encrypted_aes_key)) + client_id.encode(
-                        #             'utf-8').ljust(16, b'\x00') + encrypted_aes_key
-                        #         conn.sendall(response)
-                        #         print(f"Sent AES key and reconnection confirmation with client ID: {client_id}")
-                        #
-                        #     else:
-                        #         print(f"User {username} not found. Reconnection denied.")
-                        #
-                        #         # Send failure response (reconnection denied) with code 1606
-                        #         client_id = str(uuid.uuid4())[
-                        #                     :16]  # Generate or reuse existing client ID, ensure it's 16 bytes
-                        #         response = struct.pack('!B H I', 1, 1606, 16) + client_id.encode('utf-8').ljust(16,
-                        #                                                                                         b'\x00')
-                        #         conn.sendall(response)
-                        #         print(f"Sent reconnection denial for user: {username}")
-                        #
-                        #
-                        # else:
-                        #     print(f"Unknown request code: {client_id}")
-                        #     conn.sendall(b"Unknown request")
+                print(f"Connected by {addr}")
+                # יצירת תהליכון חדש עבור כל לקוח
+                client_thread = threading.Thread(target=handle_client, args=(conn, addr))
+                client_thread.start()
             except KeyboardInterrupt:
                 print("Server shutting down.")
                 break
